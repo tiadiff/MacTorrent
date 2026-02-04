@@ -38,7 +38,7 @@ brew install transmission
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/MacTorrent.git
+   git clone https://github.com/tiadiff/MacTorrent.git
    cd MacTorrent
    ```
 
