@@ -84,6 +84,17 @@ struct ContentView: View {
                         Label("Actions", systemImage: "ellipsis.circle")
                     }
                     
+                    // Daemon Status
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(daemonStatusColor)
+                            .frame(width: 8, height: 8)
+                        Text(daemonStatusText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.trailing, 8)
+                    
                     Button(action: openTorrent) {
                         Label("Add Torrent", systemImage: "plus")
                     }
@@ -113,6 +124,11 @@ struct ContentView: View {
             }
         } message: {
             Text("Remove '\(torrentToRemove?.name ?? "")'?")
+        }
+        .alert("Error", isPresented: $torrentManager.showError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(torrentManager.errorMessage ?? "Unknown error")
         }
     }
     
@@ -179,6 +195,24 @@ struct ContentView: View {
             }
         }
         return true
+    }
+
+    private var daemonStatusColor: Color {
+        switch torrentManager.daemonStatus {
+        case .running: return .green
+        case .starting: return .yellow
+        case .stopped: return .gray
+        case .failed: return .red
+        }
+    }
+    
+    private var daemonStatusText: String {
+        switch torrentManager.daemonStatus {
+        case .running: return "Connected"
+        case .starting: return "Starting..."
+        case .stopped: return "Stopped"
+        case .failed: return "Failed"
+        }
     }
 }
 

@@ -10,11 +10,7 @@ struct MacTorrentApp: App {
         }
         .windowStyle(.titleBar)
         .windowResizability(.contentSize)
-        .defaultSize(width: 320, height: 480)
-        
-        Settings {
-            SettingsView()
-        }
+        .defaultSize(width: 400, height: 400)
     }
 }
 

@@ -6,7 +6,7 @@ actor TransmissionRPC {
     private var sessionId: String?
     
     init(port: Int = 9091) {
-        self.baseURL = URL(string: "http://localhost:\(port)/transmission/rpc")!
+        self.baseURL = URL(string: "http://127.0.0.1:\(port)/transmission/rpc")!
     }
     
     // MARK: - Torrent Operations

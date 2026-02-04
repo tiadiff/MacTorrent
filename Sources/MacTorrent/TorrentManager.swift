@@ -9,6 +9,8 @@ class TorrentManager {
     var torrents: [TorrentDisplayItem] = []
     var isLoading = false
     var errorMessage: String?
+    var showError = false
+    var daemonStatus: DaemonStatus = .starting
     
     private let rpc = TransmissionRPC()
     private var pollTask: Task<Void, Never>?
@@ -26,10 +28,13 @@ class TorrentManager {
         do {
             try await DaemonManager.shared.start()
             print("DEBUG: Daemon started successfully, beginning polling")
+            daemonStatus = .running
             startPolling()
         } catch {
             print("DEBUG: Daemon start failed: \(error)")
+            daemonStatus = .stopped
             errorMessage = "Failed to start daemon: \(error.localizedDescription)"
+            showError = true
         }
     }
     
@@ -50,21 +55,9 @@ class TorrentManager {
             let infos = try await rpc.getTorrents()
             let newTorrents = infos.map { TorrentDisplayItem(from: $0) }
             
-            // Update if different
+            // Update if different (default Equatable now checks all fields)
             if torrents != newTorrents {
                 torrents = newTorrents
-            }
-            
-            // Check for auto-stop
-            if UserDefaults.standard.bool(forKey: "stopSeedingOnCompletion") {
-                for torrent in newTorrents {
-                    if torrent.state == .seeding { // Seeding implies 100% complete
-                        print("DEBUG: Auto-stopping seeding torrent: \(torrent.name)")
-                        Task {
-                           await pauseTorrent(torrent)
-                        }
-                    }
-                }
             }
         } catch {
             print("DEBUG: Poll error: \(error)")
@@ -89,6 +82,7 @@ class TorrentManager {
         } catch {
             print("DEBUG: Failed to add torrent: \(error)")
             errorMessage = "Failed to add torrent: \(error.localizedDescription)"
+            showError = true
         }
     }
     
@@ -235,4 +229,11 @@ enum TorrentState: String, CaseIterable {
     case downloading = "Downloading"
     case seeding = "Seeding"
     case verifying = "Verifying"
+}
+
+enum DaemonStatus {
+    case starting
+    case running
+    case stopped
+    case failed
 }

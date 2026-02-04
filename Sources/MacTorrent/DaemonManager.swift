@@ -46,17 +46,15 @@ class DaemonManager: ObservableObject {
     func start() async throws {
         print("DEBUG: DaemonManager.start() called")
         
-        // Check if a daemon is already running (from previous session or manually)
+        // Check if a daemon is already running
         if await checkExistingDaemon() {
             print("DEBUG: Found existing daemon, reusing it")
             isRunning = true
             return
         }
         
-        guard !isRunning else {
-            print("DEBUG: Daemon already marked as running")
-            return
-        }
+        // If not responding, ensure we kill any zombie processes (as admin)
+        await killExistingDaemon()
         
         // Create config directory if needed
         try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
@@ -67,56 +65,69 @@ class DaemonManager: ObservableObject {
             try createDefaultSettings(at: settingsPath)
         }
         
-        // Start daemon
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: daemonPath)
-        process.arguments = [
+        print("DEBUG: Requesting admin privileges to start daemon...")
+        
+        // Construct the command
+        // Using a fixed log path for easier debugging
+        let logPath = "/tmp/transmission-daemon.log"
+        
+        // Ensure log file exists and specific permissions are set if needed (optional)
+        // But for now, we just overwrite.
+        
+        let cmdArgs = [
+            "'\(daemonPath)'",
             "--foreground",
-            "--config-dir", configDir.path,
-            "--port", String(peerPort),
-            "--download-dir", downloadDir.path,
-            "--watch-dir", downloadDir.path,
-            "--log-level=info"
+            "--config-dir '\(configDir.path)'",
+            "--config-dir '\(configDir.path)'",
+            "--peerport \(peerPort)", // -P / --peerport is for peers
+            "--download-dir '\(downloadDir.path)'",
+            "--watch-dir '\(downloadDir.path)'",
+            "--log-level=info",
+            "--rpc-bind-address 127.0.0.1",
+            "--port \(rpcPort)", // -p / --port is for RPC
+            "--allowed 127.0.0.1",
+            "--no-auth",
+            "--logfile '\(logPath)'" // Explicit format for native logging if supported, or via redirection below
         ]
         
-        // Capture output
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
+        // We redirect both stdout and stderr to the log file
+        let command = "\(cmdArgs.joined(separator: " ")) > '\(logPath)' 2>&1 & echo $!"
         
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                self?.logger.debug("daemon: \(output)")
+        print("DEBUG: Launching daemon with command: \(command)")
+        
+        let scriptSource = "do shell script \"\(command)\" with administrator privileges"
+        
+        let success = await MainActor.run { () -> Bool in
+            var errorInfo: NSDictionary?
+            if let script = NSAppleScript(source: scriptSource) {
+                let result = script.executeAndReturnError(&errorInfo)
+                if let error = errorInfo {
+                    print("DEBUG: AppleScript error: \(error)")
+                    self.lastError = DaemonError.scriptError(error["NSAppleScriptErrorMessage"] as? String ?? "Unknown error")
+                    return false
+                }
+                
+                if let pidStr = result.stringValue {
+                    print("DEBUG: Daemon started as root, PID: \(pidStr)")
+                }
+                return true
             }
+            return false
         }
         
-        process.terminationHandler = { [weak self] _ in
-            Task { @MainActor in
-                self?.isRunning = false
-                self?.logger.info("Daemon terminated")
-            }
-        }
-        
-        do {
-            try process.run()
-            self.daemonProcess = process
+        if success {
             self.isRunning = true
-            print("DEBUG: Daemon process started, PID: \(process.processIdentifier)")
-            
             // Wait for RPC to be ready
             try await waitForRPC()
             print("DEBUG: RPC is ready!")
-        } catch {
-            print("DEBUG: Failed to start daemon: \(error)")
-            lastError = error
-            throw error
+        } else {
+            throw lastError ?? DaemonError.notRunning
         }
     }
     
     /// Check if an existing daemon is already running and responding.
     private func checkExistingDaemon() async -> Bool {
-        let url = URL(string: "http://localhost:\(rpcPort)/transmission/rpc")!
+        let url = URL(string: "http://127.0.0.1:\(rpcPort)/transmission/rpc")!
         var request = URLRequest(url: url)
         request.timeoutInterval = 2
         
@@ -146,42 +157,58 @@ class DaemonManager: ObservableObject {
     private func killExistingDaemon() async {
         print("DEBUG: Killing any existing transmission-daemon processes...")
         
-        let killProcess = Process()
-        killProcess.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        killProcess.arguments = ["-9", "transmission-daemon"]
+        let scriptSource = "do shell script \"pkill -9 transmission-daemon\" with administrator privileges"
         
-        do {
-            try killProcess.run()
-            killProcess.waitUntilExit()
-            // Wait a moment for process to fully die
-            try await Task.sleep(for: .milliseconds(500))
-            print("DEBUG: Killed existing daemon (if any)")
-        } catch {
-            print("DEBUG: pkill failed (no daemon was running): \(error.localizedDescription)")
+        _ = await MainActor.run {
+            var errorInfo: NSDictionary?
+            if let script = NSAppleScript(source: scriptSource) {
+                 _ = script.executeAndReturnError(&errorInfo)
+                 if let error = errorInfo {
+                     print("DEBUG: pkill error (might be none running): \(error)")
+                 } else {
+                     print("DEBUG: Killed existing daemons")
+                 }
+            }
+            return true
         }
+        
+        // Wait a moment for process to fully die
+        try? await Task.sleep(for: .milliseconds(1000))
     }
     
     /// Wait for RPC to become available.
-    private func waitForRPC(timeout: TimeInterval = 15) async throws {
+    private func waitForRPC(timeout: TimeInterval = 45) async throws {
         print("DEBUG: Waiting for RPC to become available...")
         
-        // Give daemon a moment to start up
-        try await Task.sleep(for: .seconds(1))
-        
         let deadline = Date().addingTimeInterval(timeout)
-        let url = URL(string: "http://localhost:\(rpcPort)/transmission/rpc")!
+        let url = URL(string: "http://127.0.0.1:\(rpcPort)/transmission/rpc")!
         var attempts = 0
         
         while Date() < deadline {
             attempts += 1
+            
+            // Fast fail if we can't find the process anymore
+            // Note: Since we use sudo, we can't easily check the PID owner, but pgrep helps
+            /*
+            let checkProcess = Process()
+            checkProcess.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            checkProcess.arguments = ["transmission-daemon"]
+            try? checkProcess.run()
+            checkProcess.waitUntilExit()
+            if checkProcess.terminationStatus != 0 {
+                print("DEBUG: transmission-daemon process seems to have died.")
+                throw DaemonError.notRunning
+            }
+            */
+            
             do {
                 var request = URLRequest(url: url)
                 request.timeoutInterval = 2
                 let (_, response) = try await URLSession.shared.data(for: request)
                 if let http = response as? HTTPURLResponse {
                     print("DEBUG: RPC response code: \(http.statusCode)")
-                    if http.statusCode == 409 {
-                        // 409 means RPC is ready (needs session-id)
+                    if http.statusCode == 409 || http.statusCode == 200 {
+                        // 409 means RPC is ready (needs session-id), 200 means auth disabled/ready
                         print("DEBUG: RPC ready after \(attempts) attempts")
                         return
                     }
@@ -189,7 +216,7 @@ class DaemonManager: ObservableObject {
             } catch {
                 print("DEBUG: RPC attempt \(attempts) failed: \(error.localizedDescription)")
             }
-            try await Task.sleep(for: .milliseconds(500))
+            try await Task.sleep(for: .milliseconds(1000))
         }
         
         print("DEBUG: RPC timeout after \(attempts) attempts")
@@ -225,11 +252,13 @@ class DaemonManager: ObservableObject {
 enum DaemonError: LocalizedError {
     case rpcNotReady
     case notRunning
+    case scriptError(String)
     
     var errorDescription: String? {
         switch self {
         case .rpcNotReady: return "Daemon RPC not responding"
         case .notRunning: return "Daemon is not running"
+        case .scriptError(let msg): return "Script error: \(msg)"
         }
     }
 }
