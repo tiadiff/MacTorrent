@@ -1,0 +1,1 @@
+MacTorrent is a modern, native macOS BitTorrent client built with SwiftUI and powered by the transmission-daemon. It offers a beautiful, "juicy" interface with real-time stats, drag-and-drop support, and native performance for macOS 15+.
