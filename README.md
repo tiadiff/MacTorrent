@@ -4,6 +4,9 @@
 
 > **Note**: This project is currently in active development.
 
+ <img width="507" height="507" alt="image" src="https://github.com/user-attachments/assets/816aeb9e-dae3-4ef8-a26f-6ff7e447e5ec" />
+
+
 ## ✨ Features
 
 - **Native macOS Experience**: Built with SwiftUI for a smooth, responsive, and native look and feel.
